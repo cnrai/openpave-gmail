@@ -5,7 +5,7 @@
  * Uses the PAVE sandbox secure token system for authentication.
  * Tokens are never visible to sandbox code - they're injected by the host.
  * 
- * Token configuration in ~/.config/opencode-lite/permissions.json:
+ * Token configuration in ~/.pave/permissions.yaml:
  * {
  *   "tokens": {
  *     "gmail": {

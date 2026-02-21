@@ -1,15 +1,15 @@
-# pave-gmail
+# openpave-gmail
 
-📧 Gmail skill for OpenPave - Read and manage Gmail messages securely using OAuth.
+📧 Gmail skill for OpenPAVE - Read and manage Gmail messages securely using OAuth.
 
 ## Installation
 
 ```bash
 # From local directory
-pave install ~/pave-apps/pave-gmail
+pave install ~/pave-apps/openpave-gmail
 
 # From GitHub (coming soon)
-pave install openpave/pave-gmail
+pave install openpave/openpave-gmail
 ```
 
 ## Setup
