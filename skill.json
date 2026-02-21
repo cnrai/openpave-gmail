@@ -1,0 +1,102 @@
+{
+  "$schema": "https://skills.openpave.ai/schema/skill.v1.json",
+  
+  "name": "gmail",
+  "version": "1.0.0",
+  "description": "Read and manage Gmail messages securely using OAuth",
+  "author": {
+    "name": "OpenPave",
+    "url": "https://github.com/openpave"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/openpave/pave-gmail",
+  "repository": "openpave/pave-gmail",
+  
+  "pattern": "sandbox",
+  "entrypoint": "index.js",
+  
+  "commands": [
+    {
+      "name": "profile",
+      "description": "Get Gmail profile info",
+      "options": ["--summary", "--json"]
+    },
+    {
+      "name": "list",
+      "description": "List recent messages",
+      "options": ["--max <number>", "--summary", "--json", "--full", "-q, --query <query>"]
+    },
+    {
+      "name": "unread",
+      "description": "Show unread messages",
+      "options": ["--max <number>", "--summary", "--json"]
+    },
+    {
+      "name": "read",
+      "description": "Read a specific message",
+      "args": ["<messageId>"],
+      "options": ["--summary", "--json"]
+    },
+    {
+      "name": "mark-read",
+      "description": "Mark messages as read",
+      "args": ["<messageId...>"],
+      "options": ["--summary", "--json"]
+    },
+    {
+      "name": "mark-unread",
+      "description": "Mark a message as unread",
+      "args": ["<messageId>"],
+      "options": ["--summary", "--json"]
+    },
+    {
+      "name": "trash",
+      "description": "Move messages to trash",
+      "args": ["<messageId...>"],
+      "options": ["--summary", "--json"]
+    }
+  ],
+  
+  "tokens": {
+    "gmail": {
+      "type": "oauth",
+      "description": "Gmail API OAuth credentials",
+      "domains": ["gmail.googleapis.com", "*.googleapis.com"],
+      "env": {
+        "required": ["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"],
+        "optional": ["GMAIL_ACCESS_TOKEN"]
+      },
+      "config": {
+        "env": "GMAIL_ACCESS_TOKEN",
+        "type": "oauth",
+        "domains": ["gmail.googleapis.com", "*.googleapis.com"],
+        "placement": {
+          "type": "header",
+          "name": "Authorization",
+          "format": "Bearer {token}"
+        },
+        "refreshEnv": "GMAIL_REFRESH_TOKEN",
+        "refreshUrl": "https://oauth2.googleapis.com/token",
+        "clientIdEnv": "GMAIL_CLIENT_ID",
+        "clientSecretEnv": "GMAIL_CLIENT_SECRET"
+      }
+    }
+  },
+  
+  "permissions": {
+    "fs.read": [],
+    "fs.write": [],
+    "network": ["gmail.googleapis.com", "oauth2.googleapis.com"],
+    "modules": ["fs", "path"],
+    "system": []
+  },
+  
+  "platforms": ["darwin", "linux", "win32"],
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  
+  "keywords": ["email", "gmail", "google", "oauth", "inbox", "messages"],
+  "category": "communication",
+  "icon": "📧"
+}
