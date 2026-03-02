@@ -2,8 +2,8 @@
 # Read and manage Gmail messages securely using OAuth
 
 name: gmail
-version: 1.1.0
-description: Read and manage Gmail messages securely using OAuth
+version: 2.0.0
+description: Read, send, and manage Gmail messages securely using OAuth
 
 author:
   name: cnrai
@@ -72,6 +72,87 @@ commands:
     options:
       - --summary
       - --json
+
+  - name: attachments
+    description: List attachments on a message
+    args:
+      - <messageId>
+    options:
+      - --summary
+      - --json
+
+  - name: download
+    description: Download an attachment
+    args:
+      - <messageId>
+      - <attachmentId>
+    options:
+      - -o, --output <file>
+      - --json
+
+  - name: draft
+    description: Create a new draft email
+    options:
+      - --to <email>
+      - --cc <email>
+      - --bcc <email>
+      - --subject <text>
+      - --body <text>
+      - --input <file>
+      - --reply-to <messageId>
+      - --json
+      - --summary
+
+  - name: drafts
+    description: List draft emails
+    options:
+      - --max <number>
+      - -q, --query <query>
+      - --json
+      - --summary
+
+  - name: send-draft
+    description: Send an existing draft
+    args:
+      - <draftId>
+    options:
+      - --json
+      - --summary
+
+  - name: delete-draft
+    description: Delete a draft
+    args:
+      - <draftId>
+    options:
+      - --json
+      - --summary
+
+  - name: send
+    description: Send an email directly
+    options:
+      - --to <email>
+      - --cc <email>
+      - --bcc <email>
+      - --subject <text>
+      - --body <text>
+      - --input <file>
+      - --json
+      - --summary
+
+  - name: reply
+    description: Reply to an existing message
+    args:
+      - <messageId>
+    options:
+      - --to <email>
+      - --cc <email>
+      - --bcc <email>
+      - --subject <text>
+      - --body <text>
+      - --input <file>
+      - --draft
+      - --json
+      - --summary
 
 # Token configuration for secure sandbox access
 tokens:

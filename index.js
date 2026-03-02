@@ -196,6 +196,194 @@ class GmailClient {
     });
   }
   
+  // Get attachment metadata from a message
+  getAttachment(messageId, attachmentId) {
+    return this.request(`/users/me/messages/${messageId}/attachments/${attachmentId}`);
+  }
+  
+  // Extract attachment info from message parts (recursive for multipart)
+  static extractAttachments(parts, result) {
+    result = result || [];
+    if (!parts) return result;
+    
+    for (const part of parts) {
+      if (part.filename && part.filename.length > 0) {
+        result.push({
+          partId: part.partId,
+          filename: part.filename,
+          mimeType: part.mimeType,
+          size: part.body?.size || 0,
+          attachmentId: part.body?.attachmentId || null
+        });
+      }
+      // Recurse into nested parts (multipart/mixed, multipart/related, etc.)
+      if (part.parts) {
+        GmailClient.extractAttachments(part.parts, result);
+      }
+    }
+    return result;
+  }
+  
+  // Download attachment and return base64 data
+  downloadAttachment(messageId, attachmentId) {
+    const att = this.getAttachment(messageId, attachmentId);
+    return att.data; // base64url encoded
+  }
+  
+  // Create a draft
+  createDraft(options) {
+    const raw = GmailClient.buildRawMessage(options);
+    const body = {
+      message: { raw: raw }
+    };
+    if (options.threadId) {
+      body.message.threadId = options.threadId;
+    }
+    return this.request('/users/me/drafts', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+  }
+  
+  // Send a message directly
+  sendMessage(options) {
+    const raw = GmailClient.buildRawMessage(options);
+    const body = { raw: raw };
+    if (options.threadId) {
+      body.threadId = options.threadId;
+    }
+    return this.request('/users/me/messages/send', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+  }
+  
+  // List drafts
+  listDrafts(options) {
+    const paramData = {};
+    if (options.maxResults) paramData.maxResults = options.maxResults;
+    if (options.q) paramData.q = options.q;
+    const queryString = Object.keys(paramData).length > 0 ? '?' + encodeFormData(paramData) : '';
+    return this.request('/users/me/drafts' + queryString);
+  }
+  
+  // Get a specific draft
+  getDraft(draftId) {
+    return this.request('/users/me/drafts/' + draftId + '?format=full');
+  }
+  
+  // Send an existing draft
+  sendDraft(draftId) {
+    return this.request('/users/me/drafts/send', {
+      method: 'POST',
+      body: JSON.stringify({ id: draftId })
+    });
+  }
+  
+  // Delete a draft
+  deleteDraft(draftId) {
+    const url = this.baseUrl + '/users/me/drafts/' + draftId;
+    const response = authenticatedFetch('gmail', url, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 15000
+    });
+    if (!response.ok && response.status !== 204) {
+      const error = response.json();
+      const err = new Error(error.error?.message || 'HTTP ' + response.status);
+      err.status = response.status;
+      throw err;
+    }
+    return { success: true };
+  }
+  
+  // Build RFC 2822 raw message (base64url encoded)
+  static buildRawMessage(options) {
+    var lines = [];
+    
+    if (options.from) lines.push('From: ' + options.from);
+    if (options.to) lines.push('To: ' + options.to);
+    if (options.cc) lines.push('Cc: ' + options.cc);
+    if (options.bcc) lines.push('Bcc: ' + options.bcc);
+    if (options.subject) lines.push('Subject: ' + options.subject);
+    if (options.inReplyTo) lines.push('In-Reply-To: ' + options.inReplyTo);
+    if (options.references) lines.push('References: ' + options.references);
+    
+    lines.push('MIME-Version: 1.0');
+    lines.push('Content-Type: text/plain; charset=UTF-8');
+    lines.push('Content-Transfer-Encoding: 7bit');
+    lines.push('');
+    lines.push(options.body || '');
+    
+    var message = lines.join('\r\n');
+    
+    // Base64url encode
+    var encoded = GmailClient.base64UrlEncode(message);
+    return encoded;
+  }
+  
+  // Base64url encode (sandbox compatible - no Buffer)
+  static base64UrlEncode(str) {
+    // Use btoa which is available in SpiderMonkey
+    var b64 = btoa(unescape(encodeURIComponent(str)));
+    // Convert to base64url: replace + with -, / with _, remove =
+    return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  
+  // Base64url decode
+  static base64UrlDecode(str) {
+    // Convert from base64url to base64
+    var b64 = str.replace(/-/g, '+').replace(/_/g, '/');
+    // Pad with =
+    while (b64.length % 4 !== 0) b64 += '=';
+    try {
+      return decodeURIComponent(escape(atob(b64)));
+    } catch (e) {
+      // Binary data - return raw decoded
+      return atob(b64);
+    }
+  }
+  
+  // Extract plain text body from message parts
+  static extractBody(payload) {
+    if (!payload) return '';
+    
+    // Simple message with body directly
+    if (payload.body && payload.body.data) {
+      return GmailClient.base64UrlDecode(payload.body.data);
+    }
+    
+    // Multipart message - look for text/plain first, then text/html
+    if (payload.parts) {
+      // First pass: look for text/plain
+      for (var i = 0; i < payload.parts.length; i++) {
+        var part = payload.parts[i];
+        if (part.mimeType === 'text/plain' && part.body && part.body.data) {
+          return GmailClient.base64UrlDecode(part.body.data);
+        }
+      }
+      // Second pass: recurse into multipart sub-parts
+      for (var j = 0; j < payload.parts.length; j++) {
+        var subPart = payload.parts[j];
+        if (subPart.parts) {
+          var body = GmailClient.extractBody(subPart);
+          if (body) return body;
+        }
+      }
+      // Third pass: fallback to text/html
+      for (var k = 0; k < payload.parts.length; k++) {
+        var htmlPart = payload.parts[k];
+        if (htmlPart.mimeType === 'text/html' && htmlPart.body && htmlPart.body.data) {
+          var html = GmailClient.base64UrlDecode(htmlPart.body.data);
+          // Strip HTML tags for plain text display
+          return html.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+        }
+      }
+    }
+    
+    return '';
+  }
+  
   // Format message for human-readable output
   static formatMessage(message) {
     const headers = message.payload?.headers || [];
@@ -258,19 +446,34 @@ USAGE:
 
 COMMANDS:
   profile                     Get Gmail profile info
-  list [options]             List recent messages  
-  unread [options]           Show unread messages
-  read <messageId>           Read specific message
-  mark-read <id1> [id2...]   Mark messages as read
-  mark-unread <id>           Mark message as unread
-  trash <id1> [id2...]       Move messages to trash
+  list [options]              List recent messages  
+  unread [options]            Show unread messages
+  read <messageId>            Read specific message (full body)
+  mark-read <id1> [id2...]    Mark messages as read
+  mark-unread <id>            Mark message as unread
+  trash <id1> [id2...]        Move messages to trash
+  attachments <messageId>     List attachments on a message
+  download <messageId> <attachmentId>  Download an attachment
+  draft [options]             Create a new draft email
+  drafts [options]            List drafts
+  send-draft <draftId>        Send an existing draft
+  delete-draft <draftId>      Delete a draft
+  send [options]              Send an email directly
+  reply <messageId> [options] Reply to a message
 
 OPTIONS:
-  --max <number>             Maximum results (default: 10)
-  --summary                  Human-readable output
-  --json                     Raw JSON output
-  --full                     Include full message content
-  -q, --query <query>        Search query
+  --max <number>              Maximum results (default: 10)
+  --summary                   Human-readable output
+  --json                      Raw JSON output
+  --full                      Include full message content
+  -q, --query <query>         Search query
+  --to <email>                Recipient(s) (comma-separated)
+  --cc <email>                CC recipient(s)
+  --bcc <email>               BCC recipient(s)
+  --subject <text>            Email subject
+  --body <text>               Email body text
+  --input <file>              Read body from file
+  -o, --output <file>         Output file for downloads
 
 EXAMPLES:
   node gmail.js profile --summary
@@ -278,7 +481,13 @@ EXAMPLES:
   node gmail.js unread --summary
   node gmail.js list -q "from:someone@example.com"
   node gmail.js read 1234567890abcdef
-  node gmail.js mark-read 1234567890abcdef
+  node gmail.js attachments 1234567890abcdef
+  node gmail.js download 1234567890abcdef ATT_ID -o /tmp/file.pdf
+  node gmail.js draft --to "user@example.com" --subject "Hello" --body "Hi there"
+  node gmail.js send --to "user@example.com" --subject "Hello" --body "Hi there"
+  node gmail.js reply 1234567890abcdef --body "Thanks for your email"
+  node gmail.js drafts --summary
+  node gmail.js send-draft DRAFT_ID
 
 TOKEN SETUP:
   Tokens are configured in ~/.config/opencode-lite/permissions.json
@@ -453,82 +662,439 @@ function main() {
         }
         
         const message = client.getMessage(messageId, 'full');
+        const formatted = GmailClient.formatMessage(message);
+        const bodyText = GmailClient.extractBody(message.payload);
+        const attachments = GmailClient.extractAttachments(message.payload?.parts);
         
-        if (parsed.options.summary) {
-          const formatted = GmailClient.formatMessage(message);
-          console.log(`Subject: ${formatted.subject}`);
-          console.log(`From: ${formatted.from}`);
-          console.log(`Date: ${formatted.date}`);
-          console.log(`Labels: ${formatted.labels.join(', ')}`);
-          console.log(`\nContent:\n${message.snippet}`);
-        } else if (parsed.options.json) {
+        if (parsed.options.json) {
           console.log(JSON.stringify(message, null, 2));
         } else {
-          // Default: summary format
-          const formatted = GmailClient.formatMessage(message);
-          console.log(`Subject: ${formatted.subject}`);
-          console.log(`From: ${formatted.from}`);
-          console.log(`Date: ${formatted.date}`);
-          console.log(`Labels: ${formatted.labels.join(', ')}`);
-          console.log(`\nContent:\n${message.snippet}`);
+          console.log('Subject: ' + formatted.subject);
+          console.log('From: ' + formatted.from);
+          console.log('To: ' + formatted.to);
+          console.log('Date: ' + formatted.date);
+          console.log('Labels: ' + formatted.labels.join(', '));
+          
+          if (attachments.length > 0) {
+            console.log('\nAttachments (' + attachments.length + '):');
+            attachments.forEach(function(att, idx) {
+              var sizeStr = att.size > 1024 ? Math.round(att.size / 1024) + 'KB' : att.size + 'B';
+              console.log('  ' + (idx + 1) + '. ' + att.filename + ' (' + att.mimeType + ', ' + sizeStr + ')');
+            });
+          }
+          
+          console.log('\nContent:\n' + (bodyText || message.snippet));
+        }
+        break;
+      }
+      
+      case 'attachments': {
+        const messageId = parsed.positional[0];
+        if (!messageId) {
+          console.error('Error: Message ID required');
+          console.error('Usage: node gmail.js attachments <messageId>');
+          process.exit(1);
+        }
+        
+        const message = client.getMessage(messageId, 'full');
+        const formatted = GmailClient.formatMessage(message);
+        const attachments = GmailClient.extractAttachments(message.payload?.parts);
+        
+        if (parsed.options.json) {
+          console.log(JSON.stringify({ messageId: messageId, subject: formatted.subject, attachments: attachments }, null, 2));
+        } else {
+          console.log('Message: ' + formatted.subject);
+          console.log('From: ' + formatted.from);
+          console.log('');
+          
+          if (attachments.length === 0) {
+            console.log('No attachments found.');
+          } else {
+            console.log('Attachments (' + attachments.length + '):');
+            console.log('');
+            attachments.forEach(function(att, idx) {
+              var sizeStr = att.size > 1024 ? Math.round(att.size / 1024) + 'KB' : att.size + 'B';
+              console.log('  ' + (idx + 1) + '. ' + att.filename);
+              console.log('     Type: ' + att.mimeType + ' | Size: ' + sizeStr);
+              console.log('     Attachment ID: ' + (att.attachmentId || 'inline'));
+              console.log('');
+            });
+          }
+        }
+        break;
+      }
+      
+      case 'download': {
+        var msgId = parsed.positional[0];
+        var attId = parsed.positional[1];
+        
+        if (!msgId || !attId) {
+          console.error('Error: Message ID and Attachment ID required');
+          console.error('Usage: node gmail.js download <messageId> <attachmentId> [-o output_file]');
+          console.error('');
+          console.error('Tip: Use "gmail.js attachments <messageId>" to find attachment IDs');
+          process.exit(1);
+        }
+        
+        var outputPath = parsed.options.o || parsed.options.output;
+        
+        // If no output path, get the filename from the message
+        if (!outputPath) {
+          var msg = client.getMessage(msgId, 'full');
+          var atts = GmailClient.extractAttachments(msg.payload?.parts);
+          var matchingAtt = null;
+          for (var ai = 0; ai < atts.length; ai++) {
+            if (atts[ai].attachmentId === attId) {
+              matchingAtt = atts[ai];
+              break;
+            }
+          }
+          outputPath = '/tmp/' + (matchingAtt ? matchingAtt.filename : 'attachment_' + Date.now());
+        }
+        
+        var data = client.downloadAttachment(msgId, attId);
+        
+        // Convert base64url to regular base64
+        var b64 = data.replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4 !== 0) b64 += '=';
+        
+        // Decode base64 to binary string and write as bytes
+        var binary = atob(b64);
+        var bytes = [];
+        for (var bi = 0; bi < binary.length; bi++) {
+          bytes.push(binary.charCodeAt(bi));
+        }
+        
+        // Write binary data - use IPC if available, otherwise try fs
+        var fs = require('fs');
+        // Write as latin1/binary encoded string
+        fs.writeFileSync(outputPath, binary, 'binary');
+        
+        if (parsed.options.json) {
+          console.log(JSON.stringify({ success: true, path: outputPath, size: binary.length }));
+        } else {
+          console.log('Downloaded: ' + outputPath + ' (' + binary.length + ' bytes)');
+        }
+        break;
+      }
+      
+      case 'draft': {
+        var to = parsed.options.to;
+        if (!to) {
+          console.error('Error: --to is required');
+          console.error('Usage: node gmail.js draft --to "user@example.com" --subject "Subject" --body "Body"');
+          process.exit(1);
+        }
+        
+        var draftBody = parsed.options.body || '';
+        if (parsed.options.input) {
+          var fs2 = require('fs');
+          draftBody = fs2.readFileSync(parsed.options.input, 'utf8');
+        }
+        
+        var draftOpts = {
+          to: to,
+          cc: parsed.options.cc || '',
+          bcc: parsed.options.bcc || '',
+          subject: parsed.options.subject || '',
+          body: draftBody
+        };
+        
+        // If replying as draft (--reply-to <messageId>)
+        if (parsed.options['reply-to']) {
+          var origMsg = client.getMessage(parsed.options['reply-to'], 'full');
+          var origHeaders = origMsg.payload?.headers || [];
+          var origMsgId = '';
+          var origRefs = '';
+          for (var hi = 0; hi < origHeaders.length; hi++) {
+            if (origHeaders[hi].name === 'Message-ID' || origHeaders[hi].name === 'Message-Id') origMsgId = origHeaders[hi].value;
+            if (origHeaders[hi].name === 'References') origRefs = origHeaders[hi].value;
+          }
+          draftOpts.inReplyTo = origMsgId;
+          draftOpts.references = origRefs ? origRefs + ' ' + origMsgId : origMsgId;
+          draftOpts.threadId = origMsg.threadId;
+          
+          if (!draftOpts.subject) {
+            var origSubject = '';
+            for (var si = 0; si < origHeaders.length; si++) {
+              if (origHeaders[si].name === 'Subject') origSubject = origHeaders[si].value;
+            }
+            if (origSubject && !origSubject.match(/^Re:/i)) {
+              draftOpts.subject = 'Re: ' + origSubject;
+            } else {
+              draftOpts.subject = origSubject;
+            }
+          }
+        }
+        
+        var draft = client.createDraft(draftOpts);
+        
+        if (parsed.options.json) {
+          console.log(JSON.stringify(draft, null, 2));
+        } else {
+          console.log('Draft created successfully');
+          console.log('  Draft ID: ' + draft.id);
+          console.log('  Message ID: ' + (draft.message?.id || 'N/A'));
+          console.log('  To: ' + to);
+          console.log('  Subject: ' + (draftOpts.subject || '(no subject)'));
+        }
+        break;
+      }
+      
+      case 'drafts': {
+        var draftsList = client.listDrafts({
+          maxResults: parseInt(parsed.options.max) || 10,
+          q: parsed.options.q || parsed.options.query
+        });
+        
+        if (!draftsList.drafts || draftsList.drafts.length === 0) {
+          console.log('No drafts found.');
+          break;
+        }
+        
+        if (parsed.options.json) {
+          // Get full details for each draft
+          var fullDrafts = [];
+          for (var di = 0; di < draftsList.drafts.length; di++) {
+            try {
+              var d = client.getDraft(draftsList.drafts[di].id);
+              fullDrafts.push(d);
+            } catch (e) {
+              fullDrafts.push({ id: draftsList.drafts[di].id, error: e.message });
+            }
+          }
+          console.log(JSON.stringify(fullDrafts, null, 2));
+        } else {
+          console.log('Found ' + draftsList.drafts.length + ' draft(s):\n');
+          for (var dj = 0; dj < draftsList.drafts.length; dj++) {
+            try {
+              var draftDetail = client.getDraft(draftsList.drafts[dj].id);
+              var draftFormatted = GmailClient.formatMessage(draftDetail.message);
+              console.log((dj + 1) + '. ' + draftFormatted.subject);
+              console.log('   To: ' + draftFormatted.to);
+              console.log('   Draft ID: ' + draftsList.drafts[dj].id);
+              console.log('');
+            } catch (e) {
+              console.log((dj + 1) + '. [Error loading draft: ' + e.message + ']');
+              console.log('');
+            }
+          }
+        }
+        break;
+      }
+      
+      case 'send-draft': {
+        var draftId = parsed.positional[0];
+        if (!draftId) {
+          console.error('Error: Draft ID required');
+          console.error('Usage: node gmail.js send-draft <draftId>');
+          process.exit(1);
+        }
+        
+        var sentResult = client.sendDraft(draftId);
+        
+        if (parsed.options.json) {
+          console.log(JSON.stringify(sentResult, null, 2));
+        } else {
+          console.log('Draft sent successfully!');
+          console.log('  Message ID: ' + (sentResult.id || 'N/A'));
+          console.log('  Thread ID: ' + (sentResult.threadId || 'N/A'));
+        }
+        break;
+      }
+      
+      case 'delete-draft': {
+        var delDraftId = parsed.positional[0];
+        if (!delDraftId) {
+          console.error('Error: Draft ID required');
+          console.error('Usage: node gmail.js delete-draft <draftId>');
+          process.exit(1);
+        }
+        
+        client.deleteDraft(delDraftId);
+        
+        if (parsed.options.json) {
+          console.log(JSON.stringify({ success: true, draftId: delDraftId }));
+        } else {
+          console.log('Draft deleted: ' + delDraftId);
+        }
+        break;
+      }
+      
+      case 'send': {
+        var sendTo = parsed.options.to;
+        if (!sendTo) {
+          console.error('Error: --to is required');
+          console.error('Usage: node gmail.js send --to "user@example.com" --subject "Subject" --body "Body"');
+          process.exit(1);
+        }
+        
+        var sendBody = parsed.options.body || '';
+        if (parsed.options.input) {
+          var fs3 = require('fs');
+          sendBody = fs3.readFileSync(parsed.options.input, 'utf8');
+        }
+        
+        var sendOpts = {
+          to: sendTo,
+          cc: parsed.options.cc || '',
+          bcc: parsed.options.bcc || '',
+          subject: parsed.options.subject || '',
+          body: sendBody
+        };
+        
+        var sent = client.sendMessage(sendOpts);
+        
+        if (parsed.options.json) {
+          console.log(JSON.stringify(sent, null, 2));
+        } else {
+          console.log('Email sent successfully!');
+          console.log('  Message ID: ' + (sent.id || 'N/A'));
+          console.log('  Thread ID: ' + (sent.threadId || 'N/A'));
+          console.log('  To: ' + sendTo);
+          console.log('  Subject: ' + (sendOpts.subject || '(no subject)'));
+        }
+        break;
+      }
+      
+      case 'reply': {
+        var replyMsgId = parsed.positional[0];
+        if (!replyMsgId) {
+          console.error('Error: Message ID required');
+          console.error('Usage: node gmail.js reply <messageId> --body "Reply text"');
+          process.exit(1);
+        }
+        
+        var replyBodyText = parsed.options.body || '';
+        if (parsed.options.input) {
+          var fs4 = require('fs');
+          replyBodyText = fs4.readFileSync(parsed.options.input, 'utf8');
+        }
+        
+        if (!replyBodyText) {
+          console.error('Error: --body or --input is required');
+          process.exit(1);
+        }
+        
+        // Get original message for threading headers
+        var origMessage = client.getMessage(replyMsgId, 'full');
+        var replyHeaders = origMessage.payload?.headers || [];
+        var origMessageId = '';
+        var origReferences = '';
+        var origSubject2 = '';
+        var origFrom = '';
+        var origTo2 = '';
+        
+        for (var rhi = 0; rhi < replyHeaders.length; rhi++) {
+          var hdr = replyHeaders[rhi];
+          if (hdr.name === 'Message-ID' || hdr.name === 'Message-Id') origMessageId = hdr.value;
+          if (hdr.name === 'References') origReferences = hdr.value;
+          if (hdr.name === 'Subject') origSubject2 = hdr.value;
+          if (hdr.name === 'From') origFrom = hdr.value;
+          if (hdr.name === 'To') origTo2 = hdr.value;
+        }
+        
+        // Determine reply-to address
+        var replyTo = parsed.options.to || origFrom;
+        var replyCc = parsed.options.cc || '';
+        
+        // Build subject
+        var replySubject = parsed.options.subject || '';
+        if (!replySubject) {
+          if (origSubject2 && !origSubject2.match(/^Re:/i)) {
+            replySubject = 'Re: ' + origSubject2;
+          } else {
+            replySubject = origSubject2;
+          }
+        }
+        
+        var replyOpts = {
+          to: replyTo,
+          cc: replyCc,
+          bcc: parsed.options.bcc || '',
+          subject: replySubject,
+          body: replyBodyText,
+          inReplyTo: origMessageId,
+          references: origReferences ? origReferences + ' ' + origMessageId : origMessageId,
+          threadId: origMessage.threadId
+        };
+        
+        // Send or create as draft
+        var replyResult;
+        if (parsed.options.draft) {
+          replyResult = client.createDraft(replyOpts);
+          if (parsed.options.json) {
+            console.log(JSON.stringify(replyResult, null, 2));
+          } else {
+            console.log('Reply draft created');
+            console.log('  Draft ID: ' + replyResult.id);
+            console.log('  To: ' + replyTo);
+            console.log('  Subject: ' + replySubject);
+          }
+        } else {
+          replyResult = client.sendMessage(replyOpts);
+          if (parsed.options.json) {
+            console.log(JSON.stringify(replyResult, null, 2));
+          } else {
+            console.log('Reply sent!');
+            console.log('  Message ID: ' + (replyResult.id || 'N/A'));
+            console.log('  To: ' + replyTo);
+            console.log('  Subject: ' + replySubject);
+          }
         }
         break;
       }
       
       case 'mark-read': {
-        const messageIds = parsed.positional;
-        if (messageIds.length === 0) {
+        var markReadIds = parsed.positional;
+        if (markReadIds.length === 0) {
           console.error('Error: At least one message ID required');
           console.error('Usage: node gmail.js mark-read <messageId1> [messageId2...]');
           process.exit(1);
         }
         
-        const results = [];
-        for (const messageId of messageIds) {
+        var markReadResults = [];
+        for (var mri = 0; mri < markReadIds.length; mri++) {
           try {
-            client.markAsRead(messageId);
-            results.push({ id: messageId, success: true });
-            if (parsed.options.summary) {
-              console.log(`Marked as read: ${messageId}`);
+            client.markAsRead(markReadIds[mri]);
+            markReadResults.push({ id: markReadIds[mri], success: true });
+            if (!parsed.options.json) {
+              console.log('Marked as read: ' + markReadIds[mri]);
             }
           } catch (error) {
-            results.push({ id: messageId, success: false, error: error.message });
-            if (parsed.options.summary) {
-              console.log(`Failed to mark as read: ${messageId} - ${error.message}`);
+            markReadResults.push({ id: markReadIds[mri], success: false, error: error.message });
+            if (!parsed.options.json) {
+              console.log('Failed to mark as read: ' + markReadIds[mri] + ' - ' + error.message);
             }
           }
         }
         
         if (parsed.options.json) {
-          console.log(JSON.stringify(results, null, 2));
+          console.log(JSON.stringify(markReadResults, null, 2));
         }
         break;
       }
       
       case 'mark-unread': {
-        const messageId = parsed.positional[0];
-        if (!messageId) {
+        var markUnreadId = parsed.positional[0];
+        if (!markUnreadId) {
           console.error('Error: Message ID required');
           console.error('Usage: node gmail.js mark-unread <messageId>');
           process.exit(1);
         }
         
         try {
-          client.markAsUnread(messageId);
-          if (parsed.options.summary) {
-            console.log(`Marked as unread: ${messageId}`);
-          } else if (parsed.options.json) {
-            console.log(JSON.stringify({ success: true, messageId }, null, 2));
+          client.markAsUnread(markUnreadId);
+          if (parsed.options.json) {
+            console.log(JSON.stringify({ success: true, messageId: markUnreadId }, null, 2));
           } else {
-            console.log(`Marked as unread: ${messageId}`);
+            console.log('Marked as unread: ' + markUnreadId);
           }
         } catch (error) {
-          if (parsed.options.summary) {
-            console.log(`Failed to mark as unread: ${error.message}`);
-          } else if (parsed.options.json) {
+          if (parsed.options.json) {
             console.log(JSON.stringify({ success: false, error: error.message }, null, 2));
           } else {
-            console.log(`Failed to mark as unread: ${error.message}`);
+            console.log('Failed to mark as unread: ' + error.message);
           }
           process.exit(1);
         }
@@ -536,31 +1102,31 @@ function main() {
       }
       
       case 'trash': {
-        const messageIds = parsed.positional;
-        if (messageIds.length === 0) {
+        var trashIds = parsed.positional;
+        if (trashIds.length === 0) {
           console.error('Error: At least one message ID required');
           console.error('Usage: node gmail.js trash <messageId1> [messageId2...]');
           process.exit(1);
         }
         
-        const results = [];
-        for (const messageId of messageIds) {
+        var trashResults = [];
+        for (var tri = 0; tri < trashIds.length; tri++) {
           try {
-            client.trashMessage(messageId);
-            results.push({ id: messageId, success: true });
-            if (parsed.options.summary) {
-              console.log(`Moved to trash: ${messageId}`);
+            client.trashMessage(trashIds[tri]);
+            trashResults.push({ id: trashIds[tri], success: true });
+            if (!parsed.options.json) {
+              console.log('Moved to trash: ' + trashIds[tri]);
             }
           } catch (error) {
-            results.push({ id: messageId, success: false, error: error.message });
-            if (parsed.options.summary) {
-              console.log(`Failed to trash: ${messageId} - ${error.message}`);
+            trashResults.push({ id: trashIds[tri], success: false, error: error.message });
+            if (!parsed.options.json) {
+              console.log('Failed to trash: ' + trashIds[tri] + ' - ' + error.message);
             }
           }
         }
         
         if (parsed.options.json) {
-          console.log(JSON.stringify(results, null, 2));
+          console.log(JSON.stringify(trashResults, null, 2));
         }
         break;
       }
