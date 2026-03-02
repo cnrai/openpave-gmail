@@ -2,7 +2,7 @@
 # Read and manage Gmail messages securely using OAuth
 
 name: gmail
-version: 1.0.0
+version: 1.1.0
 description: Read and manage Gmail messages securely using OAuth
 
 author:
