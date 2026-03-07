@@ -322,10 +322,30 @@ class GmailClient {
     return encoded;
   }
   
-  // Base64url encode (sandbox compatible - no Buffer)
+  // Base64url encode (sandbox compatible)
   static base64UrlEncode(str) {
-    // Use btoa which is available in SpiderMonkey
-    var b64 = btoa(unescape(encodeURIComponent(str)));
+    // Use Buffer (Node.js) first, fall back to manual encoding
+    var b64;
+    if (typeof Buffer !== 'undefined') {
+      b64 = Buffer.from(str, 'utf-8').toString('base64');
+    } else if (typeof btoa !== 'undefined') {
+      b64 = btoa(unescape(encodeURIComponent(str)));
+    } else {
+      // Manual base64 encode for environments without Buffer or btoa
+      var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      var bytes = unescape(encodeURIComponent(str));
+      var result = '';
+      for (var i = 0; i < bytes.length; i += 3) {
+        var b1 = bytes.charCodeAt(i);
+        var b2 = i + 1 < bytes.length ? bytes.charCodeAt(i + 1) : 0;
+        var b3 = i + 2 < bytes.length ? bytes.charCodeAt(i + 2) : 0;
+        result += chars.charAt(b1 >> 2);
+        result += chars.charAt(((b1 & 3) << 4) | (b2 >> 4));
+        result += i + 1 < bytes.length ? chars.charAt(((b2 & 15) << 2) | (b3 >> 6)) : '=';
+        result += i + 2 < bytes.length ? chars.charAt(b3 & 63) : '=';
+      }
+      b64 = result;
+    }
     // Convert to base64url: replace + with -, / with _, remove =
     return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
