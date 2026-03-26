@@ -306,21 +306,20 @@ class GmailClient {
   }
   
   // Build RFC 2822 raw message (base64url encoded)
+  // Supports optional file attachments via options.attachments array
+  // Each attachment: { filename, mimeType, content (Buffer or base64 string) }
   static buildRawMessage(options) {
-    var lines = [];
+    var headerLines = [];
     
-    if (options.from) lines.push('From: ' + options.from);
-    if (options.to) lines.push('To: ' + options.to);
-    if (options.cc) lines.push('Cc: ' + options.cc);
-    if (options.bcc) lines.push('Bcc: ' + options.bcc);
-    if (options.subject) lines.push('Subject: ' + options.subject);
-    if (options.inReplyTo) lines.push('In-Reply-To: ' + options.inReplyTo);
-    if (options.references) lines.push('References: ' + options.references);
+    if (options.from) headerLines.push('From: ' + options.from);
+    if (options.to) headerLines.push('To: ' + options.to);
+    if (options.cc) headerLines.push('Cc: ' + options.cc);
+    if (options.bcc) headerLines.push('Bcc: ' + options.bcc);
+    if (options.subject) headerLines.push('Subject: ' + options.subject);
+    if (options.inReplyTo) headerLines.push('In-Reply-To: ' + options.inReplyTo);
+    if (options.references) headerLines.push('References: ' + options.references);
     
-    lines.push('MIME-Version: 1.0');
-    lines.push('Content-Type: text/html; charset=UTF-8');
-    lines.push('Content-Transfer-Encoding: 7bit');
-    lines.push('');
+    headerLines.push('MIME-Version: 1.0');
     
     // Convert plain text to HTML if the body doesn't already contain HTML tags
     var bodyText = options.body || '';
@@ -334,11 +333,58 @@ class GmailClient {
         .replace(/\n/g, '<br>\n');
       bodyText = '<p>' + bodyText + '</p>';
     }
-    lines.push(bodyText);
     
-    var message = lines.join('\r\n');
+    var hasAttachments = options.attachments && options.attachments.length > 0;
+    var message;
     
-    // Base64url encode
+    if (!hasAttachments) {
+      // Simple single-part message (no attachments)
+      headerLines.push('Content-Type: text/html; charset=UTF-8');
+      headerLines.push('Content-Transfer-Encoding: 7bit');
+      headerLines.push('');
+      headerLines.push(bodyText);
+      message = headerLines.join('\r\n');
+    } else {
+      // Multipart MIME message with attachments
+      var boundary = 'pave_boundary_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      headerLines.push('Content-Type: multipart/mixed; boundary="' + boundary + '"');
+      headerLines.push('');
+      headerLines.push('--' + boundary);
+      headerLines.push('Content-Type: text/html; charset=UTF-8');
+      headerLines.push('Content-Transfer-Encoding: 7bit');
+      headerLines.push('');
+      headerLines.push(bodyText);
+      
+      // Add each attachment
+      for (var ai = 0; ai < options.attachments.length; ai++) {
+        var att = options.attachments[ai];
+        var attBase64;
+        
+        if (Buffer.isBuffer(att.content)) {
+          attBase64 = att.content.toString('base64');
+        } else {
+          // Assume already base64 string
+          attBase64 = att.content;
+        }
+        
+        // Split base64 into 76-char lines per RFC 2045
+        var wrappedBase64 = attBase64.match(/.{1,76}/g).join('\r\n');
+        
+        headerLines.push('');
+        headerLines.push('--' + boundary);
+        headerLines.push('Content-Type: ' + (att.mimeType || 'application/octet-stream') + '; name="' + att.filename + '"');
+        headerLines.push('Content-Disposition: attachment; filename="' + att.filename + '"');
+        headerLines.push('Content-Transfer-Encoding: base64');
+        headerLines.push('');
+        headerLines.push(wrappedBase64);
+      }
+      
+      headerLines.push('');
+      headerLines.push('--' + boundary + '--');
+      message = headerLines.join('\r\n');
+    }
+    
+    // Base64url encode the entire message
     var encoded = GmailClient.base64UrlEncode(message);
     return encoded;
   }
@@ -409,6 +455,61 @@ class GmailClient {
     }
     
     return result;
+  }
+  
+  // Guess MIME type from filename extension
+  static guessMimeType(filename) {
+    var ext = (filename || '').split('.').pop().toLowerCase();
+    var types = {
+      'pdf': 'application/pdf',
+      'doc': 'application/msword',
+      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'xls': 'application/vnd.ms-excel',
+      'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'ppt': 'application/vnd.ms-powerpoint',
+      'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'png': 'image/png',
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'gif': 'image/gif',
+      'svg': 'image/svg+xml',
+      'webp': 'image/webp',
+      'mp4': 'video/mp4',
+      'mp3': 'audio/mpeg',
+      'wav': 'audio/wav',
+      'zip': 'application/zip',
+      'gz': 'application/gzip',
+      'tar': 'application/x-tar',
+      'txt': 'text/plain',
+      'csv': 'text/csv',
+      'html': 'text/html',
+      'json': 'application/json',
+      'xml': 'application/xml'
+    };
+    return types[ext] || 'application/octet-stream';
+  }
+  
+  // Load file attachment from path, returns { filename, mimeType, content (Buffer) }
+  static loadAttachment(filePath) {
+    var fs = require('fs');
+    var path = require('path');
+    
+    if (!fs.existsSync(filePath)) {
+      throw new Error('Attachment file not found: ' + filePath);
+    }
+    
+    var stat = fs.statSync(filePath);
+    // Gmail API limit: ~25 MB for the entire message including base64 overhead
+    // Warn if file is over 20 MB (base64 adds ~33% overhead)
+    if (stat.size > 20 * 1024 * 1024) {
+      throw new Error('Attachment too large (' + Math.round(stat.size / 1024 / 1024) + ' MB). Gmail limit is ~25 MB total message size. Use Google Drive for large files.');
+    }
+    
+    var filename = path.basename(filePath);
+    var mimeType = GmailClient.guessMimeType(filename);
+    var content = fs.readFileSync(filePath);
+    
+    return { filename: filename, mimeType: mimeType, content: content };
   }
   
   // Extract HTML body from message parts (for quoting in replies)
@@ -585,6 +686,7 @@ OPTIONS:
   --body <text>               Email body text
   --input <file>              Read body from file
   -o, --output <file>         Output file for downloads
+  --attach <file>             Attach file(s), comma-separated for multiple
 
 EXAMPLES:
   node gmail.js profile --summary
@@ -595,8 +697,11 @@ EXAMPLES:
   node gmail.js attachments 1234567890abcdef
   node gmail.js download 1234567890abcdef ATT_ID -o /tmp/file.pdf
   node gmail.js draft --to "user@example.com" --subject "Hello" --body "Hi there"
+  node gmail.js draft --to "user@example.com" --subject "Hello" --body "Hi" --attach /tmp/file.pdf
   node gmail.js send --to "user@example.com" --subject "Hello" --body "Hi there"
+  node gmail.js send --to "user@example.com" --body "See attached" --attach /tmp/a.pdf,/tmp/b.png
   node gmail.js reply 1234567890abcdef --body "Thanks for your email"
+  node gmail.js reply 1234567890abcdef --body "See attached" --attach /tmp/report.pdf
   node gmail.js drafts --summary
   node gmail.js send-draft DRAFT_ID
 
@@ -906,6 +1011,16 @@ function main() {
           body: draftBody
         };
         
+        // Handle file attachments (--attach path1,path2,... or --attach path)
+        if (parsed.options.attach) {
+          var attachPaths = parsed.options.attach.split(',');
+          draftOpts.attachments = [];
+          for (var api = 0; api < attachPaths.length; api++) {
+            var att = GmailClient.loadAttachment(attachPaths[api].trim());
+            draftOpts.attachments.push(att);
+          }
+        }
+        
         // If replying as draft (--reply-to <messageId>)
         if (parsed.options['reply-to']) {
           var origMsg = client.getMessage(parsed.options['reply-to'], 'full');
@@ -1079,6 +1194,16 @@ function main() {
           body: sendBody
         };
         
+        // Handle file attachments (--attach path1,path2,... or --attach path)
+        if (parsed.options.attach) {
+          var sendAttachPaths = parsed.options.attach.split(',');
+          sendOpts.attachments = [];
+          for (var sai = 0; sai < sendAttachPaths.length; sai++) {
+            var sendAtt = GmailClient.loadAttachment(sendAttachPaths[sai].trim());
+            sendOpts.attachments.push(sendAtt);
+          }
+        }
+        
         var sent = client.sendMessage(sendOpts);
         
         if (parsed.options.json) {
@@ -1226,6 +1351,16 @@ function main() {
           references: origReferences ? origReferences + ' ' + origMessageId : origMessageId,
           threadId: origMessage.threadId
         };
+        
+        // Handle file attachments (--attach path1,path2,... or --attach path)
+        if (parsed.options.attach) {
+          var replyAttachPaths = parsed.options.attach.split(',');
+          replyOpts.attachments = [];
+          for (var rai = 0; rai < replyAttachPaths.length; rai++) {
+            var replyAtt = GmailClient.loadAttachment(replyAttachPaths[rai].trim());
+            replyOpts.attachments.push(replyAtt);
+          }
+        }
         
         // Send or create as draft
         var replyResult;

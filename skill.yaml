@@ -2,7 +2,7 @@
 # Read and manage Gmail messages securely using OAuth
 
 name: gmail
-version: 2.1.0
+version: 2.2.0
 description: Read, send, and manage Gmail messages securely using OAuth
 
 author:
@@ -100,6 +100,7 @@ commands:
       - --body <text>
       - --input <file>
       - --reply-to <messageId>
+      - --attach <file>
       - --json
       - --summary
 
@@ -136,6 +137,7 @@ commands:
       - --subject <text>
       - --body <text>
       - --input <file>
+      - --attach <file>
       - --json
       - --summary
 
@@ -150,6 +152,7 @@ commands:
       - --subject <text>
       - --body <text>
       - --input <file>
+      - --attach <file>
       - --draft
       - --json
       - --summary
