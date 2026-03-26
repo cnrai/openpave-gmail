@@ -936,6 +936,19 @@ function main() {
             }
           }
           
+          // Convert reply text to HTML before appending quoted thread
+          // (must happen here so buildRawMessage sees the full body as HTML)
+          var replyHtml = draftBody;
+          if (!replyHtml.match(/<[a-z][\s\S]*>/i)) {
+            replyHtml = replyHtml
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/\n\n/g, '</p><p>')
+              .replace(/\n/g, '<br>\n');
+            replyHtml = '<p>' + replyHtml + '</p>';
+          }
+          
           // Append quoted original message (same as reply command)
           var origHtml = GmailClient.extractHtmlBody(origMsg.payload);
           if (origHtml) {
@@ -944,7 +957,9 @@ function main() {
               '<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex">' +
               origHtml +
               '</blockquote></div>';
-            draftOpts.body = draftBody + quotedThread;
+            draftOpts.body = replyHtml + quotedThread;
+          } else {
+            draftOpts.body = replyHtml;
           }
         }
         
@@ -1186,8 +1201,20 @@ function main() {
             '</blockquote></div>';
         }
         
+        // Convert reply text to HTML before combining with quoted thread
+        var replyHtmlBody = replyBodyText;
+        if (!replyHtmlBody.match(/<[a-z][\s\S]*>/i)) {
+          replyHtmlBody = replyHtmlBody
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/\n\n/g, '</p><p>')
+            .replace(/\n/g, '<br>\n');
+          replyHtmlBody = '<p>' + replyHtmlBody + '</p>';
+        }
+        
         // Combine reply body with quoted original
-        var fullBody = replyBodyText + quotedHtml;
+        var fullBody = replyHtmlBody + quotedHtml;
         
         var replyOpts = {
           to: replyTo,
