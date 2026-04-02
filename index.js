@@ -121,7 +121,14 @@ class GmailClient {
       const error = response.json();
       const err = new Error(error.error?.message || `HTTP ${response.status}`);
       err.status = response.status;
+      err.code = error.error?.code || null;
       err.data = error;
+      
+      // Provide more helpful messages for common errors
+      if (response.status === 404) {
+        err.message = 'Message not found - it may have been deleted or moved';
+      }
+      
       throw err;
     }
     
@@ -883,7 +890,18 @@ function main() {
           process.exit(1);
         }
         
-        const message = client.getMessage(messageId, 'full');
+        let message;
+        try {
+          message = client.getMessage(messageId, 'full');
+        } catch (error) {
+          if (error.status === 404) {
+            console.error('[ERROR] Message not found: ' + messageId);
+            console.error('The message may have been deleted, moved to trash, or the ID is invalid.');
+            process.exit(1);
+          }
+          throw error;
+        }
+        
         const formatted = GmailClient.formatMessage(message);
         const bodyText = GmailClient.extractBody(message.payload);
         const attachments = GmailClient.extractAttachments(message.payload?.parts);
