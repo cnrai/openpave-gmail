@@ -2,7 +2,7 @@
 # Read and manage Gmail messages securely using OAuth
 
 name: gmail
-version: 2.2.1
+version: 2.3.0
 description: Read, send, and manage Gmail messages securely using OAuth
 
 author:
@@ -172,6 +172,14 @@ tokens:
         - GMAIL_REFRESH_TOKEN
       optional:
         - GMAIL_ACCESS_TOKEN
+    # OAuth authorization flow configuration (for web UI authentication)
+    oauth:
+      provider: google
+      authorizeUrl: https://accounts.google.com/o/oauth2/v2/auth
+      scopes:
+        - https://www.googleapis.com/auth/gmail.readonly
+        - https://www.googleapis.com/auth/gmail.modify
+        - https://www.googleapis.com/auth/gmail.send
     config:
       env: GMAIL_ACCESS_TOKEN
       type: oauth
