@@ -142,4 +142,7 @@ commands:
       - --attach <file>
       - --draft
 
+
+category: productivity
+icon: "\U0001F4E7"
 # Token configuration for secure sandbox access
