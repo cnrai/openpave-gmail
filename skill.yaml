@@ -2,7 +2,7 @@
 # Read and manage Gmail messages securely using OAuth
 
 name: gmail
-version: 2.3.0
+version: 2.4.0
 description: Read, send, and manage Gmail messages securely using OAuth
 
 author:
@@ -23,15 +23,12 @@ commands:
     description: Get Gmail profile info
     options:
       - --summary
-      - --json
 
   - name: list
     description: List recent messages
     options:
       - --max <number>
       - --summary
-      - --json
-      - --full
       - -q, --query <query>
 
   - name: unread
@@ -39,7 +36,6 @@ commands:
     options:
       - --max <number>
       - --summary
-      - --json
 
   - name: read
     description: Read a specific message
@@ -47,7 +43,6 @@ commands:
       - <messageId>
     options:
       - --summary
-      - --json
 
   - name: mark-read
     description: Mark messages as read
@@ -55,7 +50,6 @@ commands:
       - <messageId...>
     options:
       - --summary
-      - --json
 
   - name: mark-unread
     description: Mark a message as unread
@@ -63,7 +57,6 @@ commands:
       - <messageId>
     options:
       - --summary
-      - --json
 
   - name: trash
     description: Move messages to trash
@@ -71,7 +64,6 @@ commands:
       - <messageId...>
     options:
       - --summary
-      - --json
 
   - name: attachments
     description: List attachments on a message
@@ -79,7 +71,6 @@ commands:
       - <messageId>
     options:
       - --summary
-      - --json
 
   - name: download
     description: Download an attachment
@@ -88,11 +79,12 @@ commands:
       - <attachmentId>
     options:
       - -o, --output <file>
-      - --json
+      - --summary
 
   - name: draft
     description: Create a new draft email
     options:
+      - --summary
       - --to <email>
       - --cc <email>
       - --bcc <email>
@@ -101,23 +93,19 @@ commands:
       - --input <file>
       - --reply-to <messageId>
       - --attach <file>
-      - --json
-      - --summary
 
   - name: drafts
     description: List draft emails
     options:
+      - --summary
       - --max <number>
       - -q, --query <query>
-      - --json
-      - --summary
 
   - name: send-draft
     description: Send an existing draft
     args:
       - <draftId>
     options:
-      - --json
       - --summary
 
   - name: delete-draft
@@ -125,12 +113,12 @@ commands:
     args:
       - <draftId>
     options:
-      - --json
       - --summary
 
   - name: send
     description: Send an email directly
     options:
+      - --summary
       - --to <email>
       - --cc <email>
       - --bcc <email>
@@ -138,14 +126,13 @@ commands:
       - --body <text>
       - --input <file>
       - --attach <file>
-      - --json
-      - --summary
 
   - name: reply
     description: Reply to an existing message
     args:
       - <messageId>
     options:
+      - --summary
       - --to <email>
       - --cc <email>
       - --bcc <email>
@@ -154,76 +141,5 @@ commands:
       - --input <file>
       - --attach <file>
       - --draft
-      - --json
-      - --summary
 
 # Token configuration for secure sandbox access
-tokens:
-  gmail:
-    type: oauth
-    description: Gmail API OAuth credentials
-    domains:
-      - gmail.googleapis.com
-      - "*.googleapis.com"
-    env:
-      required:
-        - GMAIL_CLIENT_ID
-        - GMAIL_CLIENT_SECRET
-        - GMAIL_REFRESH_TOKEN
-      optional:
-        - GMAIL_ACCESS_TOKEN
-    # OAuth authorization flow configuration (for web UI authentication)
-    oauth:
-      provider: google
-      authorizeUrl: https://accounts.google.com/o/oauth2/v2/auth
-      scopes:
-        - https://www.googleapis.com/auth/gmail.readonly
-        - https://www.googleapis.com/auth/gmail.modify
-        - https://www.googleapis.com/auth/gmail.send
-    config:
-      env: GMAIL_ACCESS_TOKEN
-      type: oauth
-      domains:
-        - gmail.googleapis.com
-        - "*.googleapis.com"
-      placement:
-        type: header
-        name: Authorization
-        format: "Bearer {token}"
-      refreshEnv: GMAIL_REFRESH_TOKEN
-      refreshUrl: https://oauth2.googleapis.com/token
-      clientIdEnv: GMAIL_CLIENT_ID
-      clientSecretEnv: GMAIL_CLIENT_SECRET
-
-# Sandbox permissions
-permissions:
-  fs.read: []
-  fs.write: []
-  network:
-    - gmail.googleapis.com
-    - oauth2.googleapis.com
-  modules:
-    - fs
-    - path
-  system: []
-
-# Platform compatibility
-platforms:
-  - darwin
-  - linux
-  - win32
-
-engines:
-  node: ">=16.0.0"
-
-# Metadata
-keywords:
-  - email
-  - gmail
-  - google
-  - oauth
-  - inbox
-  - messages
-
-category: communication
-icon: "\U0001F4E7"

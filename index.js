@@ -75,11 +75,134 @@ function encodeFormData(data) {
   return params.join('&');
 }
 
+// ── PAVE Auth Proxy (replaces deprecated authenticatedFetch global) ──
+// Direct HTTP calls to the PAVE auth proxy at /proxy/:tokenName/*path
+var PAVE_PROXY_BASE = process.env.PAVE_PROXY_URL || '';
+
+function _shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+function proxyHasToken(tokenName) {
+  if (!PAVE_PROXY_BASE) return false;
+  try {
+    var url = PAVE_PROXY_BASE.replace(/\/$/, '') + '/_tokens/' + encodeURIComponent(tokenName);
+    var out = require('child_process').execSync(
+      'curl -sS --max-time 5 ' + _shellQuote(url),
+      { encoding: 'utf8', timeout: 8000, stdio: ['pipe', 'pipe', 'pipe'] }
+    );
+    var r = JSON.parse(out);
+    return r.has === true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function proxyFetch(tokenName, url, options) {
+  options = options || {};
+  if (!PAVE_PROXY_BASE) {
+    throw new Error('PAVE_PROXY_URL not set - cannot reach auth proxy');
+  }
+
+  // Build proxy URL: strip origin from upstream URL, prepend proxy base
+  var parsed = new URL(url);
+  var proxyUrl = PAVE_PROXY_BASE.replace(/\/$/, '') + '/' + encodeURIComponent(tokenName) + parsed.pathname + parsed.search;
+
+  // _mode=json: proxy returns { ok, status, headers, body } for sync parsing
+  proxyUrl += (proxyUrl.indexOf('?') !== -1 ? '&' : '?') + '_mode=json';
+
+  // _saveTo: binary-safe file download (proxy writes response to file)
+  if (options.saveTo) {
+    proxyUrl += '&_saveTo=' + encodeURIComponent(options.saveTo);
+  }
+
+  // Build curl command for synchronous HTTP
+  var method = options.method || 'GET';
+  var timeout = options.timeout || 30000;
+  var cmd = 'curl -sS -X ' + method + ' --max-time ' + Math.ceil(timeout / 1000);
+
+  var headers = Object.assign({}, options.headers || {});
+  if (options.body && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+  for (var k in headers) {
+    cmd += ' -H ' + _shellQuote(k + ': ' + headers[k]);
+  }
+
+  if (options.body) {
+    var bodyStr = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+    cmd += ' -d ' + _shellQuote(bodyStr);
+  }
+
+  cmd += ' ' + _shellQuote(proxyUrl);
+
+  // Execute synchronously
+  var out;
+  try {
+    out = require('child_process').execSync(cmd, {
+      encoding: 'utf8',
+      timeout: timeout + 5000,
+      maxBuffer: 10 * 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    var stdout = err.stdout ? err.stdout.toString() : '';
+    var stderr = err.stderr ? err.stderr.toString() : '';
+    if (stdout) {
+      out = stdout;
+    } else {
+      throw new Error('Proxy request failed: ' + (stderr.trim() || err.message));
+    }
+  }
+
+  // Parse _mode=json response
+  var resp;
+  try {
+    resp = JSON.parse(out);
+  } catch (e) {
+    return {
+      ok: true, status: 200,
+      headers: { get: function() { return null; } },
+      text: function() { return out; },
+      json: function() { return JSON.parse(out || '{}'); }
+    };
+  }
+
+  if (resp.error) throw new Error(resp.error);
+
+  // saveTo response: { ok, status, savedTo, size }
+  if (resp.savedTo) {
+    return {
+      ok: resp.ok || false, status: resp.status || 200, savedTo: resp.savedTo,
+      headers: { get: function() { return null; } },
+      text: function() { return ''; },
+      json: function() { return {}; }
+    };
+  }
+
+  // Normal response: { ok, status, headers, body }
+  return {
+    ok: resp.ok || false, status: resp.status || 200,
+    headers: {
+      get: function(name) {
+        var hs = resp.headers || {};
+        var ln = name.toLowerCase();
+        for (var key in hs) {
+          if (key.toLowerCase() === ln) return Array.isArray(hs[key]) ? hs[key][0] : hs[key];
+        }
+        return null;
+      }
+    },
+    text: function() { return resp.body || ''; },
+    json: function() { return JSON.parse(resp.body || '{}'); }
+  };
+}
+
 // Gmail Client Class - Uses secure token system
 class GmailClient {
   constructor() {
     // Check if gmail token is available via secure token system
-    if (typeof hasToken === 'function' && !hasToken('gmail')) {
+    if (!proxyHasToken('gmail')) {
       console.error('Gmail token not configured.');
       console.error('');
       console.error('Add to ~/.config/opencode-lite/permissions.json:');
@@ -107,8 +230,8 @@ class GmailClient {
   request(endpoint, options = {}) {
     const url = `${this.baseUrl}${endpoint}`;
     
-    // Use authenticatedFetch - token injection and OAuth refresh handled by sandbox
-    const response = authenticatedFetch('gmail', url, {
+    // Use proxyFetch - token injection and OAuth refresh handled by auth proxy
+    const response = proxyFetch('gmail', url, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
@@ -298,7 +421,7 @@ class GmailClient {
   // Delete a draft
   deleteDraft(draftId) {
     const url = this.baseUrl + '/users/me/drafts/' + draftId;
-    const response = authenticatedFetch('gmail', url, {
+    const response = proxyFetch('gmail', url, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       timeout: 15000
@@ -575,7 +698,16 @@ class GmailClient {
     
     // Simple message with body directly
     if (payload.body && payload.body.data) {
-      return GmailClient.base64UrlDecode(payload.body.data);
+      var rawBody = GmailClient.base64UrlDecode(payload.body.data);
+      // Clean HTML if mimeType is text/html or content looks like HTML
+      if (payload.mimeType === 'text/html') {
+        return GmailClient.htmlToText(rawBody);
+      }
+      var trimmedBody = rawBody.trimLeft();
+      if (trimmedBody.charAt(0) === '<' && /<(html|!doctype|head|body|style|table|div)\b/i.test(trimmedBody)) {
+        return GmailClient.htmlToText(rawBody);
+      }
+      return rawBody;
     }
     
     // Multipart message - look for text/plain first, then text/html
@@ -584,7 +716,13 @@ class GmailClient {
       for (var i = 0; i < payload.parts.length; i++) {
         var part = payload.parts[i];
         if (part.mimeType === 'text/plain' && part.body && part.body.data) {
-          return GmailClient.base64UrlDecode(part.body.data);
+          var plainText = GmailClient.base64UrlDecode(part.body.data);
+          // Some senders (e.g. Wrike) put raw HTML in text/plain parts — detect and clean
+          var trimmed = plainText.trimLeft();
+          if (trimmed.charAt(0) === '<' && /<(html|!doctype|head|body|style|table|div)\b/i.test(trimmed)) {
+            return GmailClient.htmlToText(plainText);
+          }
+          return plainText;
         }
       }
       // Second pass: recurse into multipart sub-parts
@@ -600,15 +738,53 @@ class GmailClient {
         var htmlPart = payload.parts[k];
         if (htmlPart.mimeType === 'text/html' && htmlPart.body && htmlPart.body.data) {
           var html = GmailClient.base64UrlDecode(htmlPart.body.data);
-          // Strip HTML tags for plain text display
-          return html.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+          return GmailClient.htmlToText(html);
         }
       }
     }
     
     return '';
   }
-  
+
+  // Convert HTML to clean plain text (strips style/script/head, preserves line breaks)
+  static htmlToText(html) {
+    if (!html) return '';
+    var text = html;
+    // Remove entire blocks that should never appear as text
+    text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+    text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+    text = text.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '');
+    text = text.replace(/<title[^>]*>[\s\S]*?<\/title>/gi, '');
+    text = text.replace(/<!--[\s\S]*?-->/g, '');
+    // Convert block-level tags to newlines before stripping
+    text = text.replace(/<\/?(p|div|br|tr|li|h[1-6])[^>]*>/gi, '\n');
+    text = text.replace(/<td[^>]*>/gi, '\t');
+    // Strip all remaining HTML tags
+    text = text.replace(/<[^>]+>/g, '');
+    // Decode common HTML entities
+    text = text.replace(/&nbsp;/g, ' ');
+    text = text.replace(/&amp;/g, '&');
+    text = text.replace(/&lt;/g, '<');
+    text = text.replace(/&gt;/g, '>');
+    text = text.replace(/&quot;/g, '"');
+    text = text.replace(/&#39;/g, "'");
+    text = text.replace(/&apos;/g, "'");
+    text = text.replace(/&hellip;/g, '...');
+    text = text.replace(/&mdash;/g, '\u2014');
+    text = text.replace(/&ndash;/g, '\u2013');
+    text = text.replace(/&#(\d+);/g, function(m, code) { return String.fromCharCode(parseInt(code, 10)); });
+    // Collapse runs of spaces/tabs (preserve newlines)
+    text = text.replace(/[ \t]+/g, ' ');
+    // Remove whitespace-only lines (common in HTML table layouts)
+    text = text.replace(/\n[ \t]+\n/g, '\n\n');
+    // Remove trailing spaces on each line
+    text = text.replace(/ +\n/g, '\n');
+    // Remove lines that are empty or whitespace-only
+    text = text.split('\n').filter(function(line) { return line.trim() !== ''; }).join('\n');
+    // Trim leading/trailing whitespace
+    return text.trim();
+  }
+
   // Format message for human-readable output
   static formatMessage(message) {
     const headers = message.payload?.headers || [];
@@ -749,14 +925,8 @@ function main() {
           console.log(`Total messages: ${result.messagesTotal}`);
           console.log(`Total threads: ${result.threadsTotal}`);
           console.log(`History ID: ${result.historyId}`);
-        } else if (parsed.options.json) {
-          console.log(JSON.stringify(result, null, 2));
         } else {
-          // Default: summary format
-          console.log(`Gmail Account: ${result.emailAddress}`);
-          console.log(`Total messages: ${result.messagesTotal}`);
-          console.log(`Total threads: ${result.threadsTotal}`);
-          console.log(`History ID: ${result.historyId}`);
+          console.log(JSON.stringify(result));
         }
         break;
       }
@@ -772,54 +942,22 @@ function main() {
         if (!result.messages || result.messages.length === 0) {
           if (parsed.options.summary) {
             console.log('No messages found.');
-          } else if (parsed.options.json) {
-            console.log(JSON.stringify({ messages: [], resultSizeEstimate: 0 }, null, 2));
           } else {
-            console.log('No messages found.');
+            console.log(JSON.stringify({ messages: [], resultSizeEstimate: 0 }));
           }
           break;
         }
         
-        if (parsed.options.json) {
-          // JSON output requested - get full messages and format them
-          const messages = client.getMessages(result.messages.map(m => m.id), 'full');
-          
-          // Check if sandbox issue is fixed via environment variable
-          const sandboxFixed = process.env.PAVE_SANDBOX_FIXED === 'true';
-          
-          if (sandboxFixed) {
-            // Future: When sandbox issue is fixed, output proper JSON array
-            const formatted = messages.map(m => {
-              if (m.error) return m;
-              return GmailClient.formatMessage(m);
-            });
-            console.log(JSON.stringify(formatted, null, 2));
-          } else {
-            // Current: Output each message as separate JSON line to avoid sandbox conversion
-            messages.forEach(m => {
-              if (m.error) {
-                console.log(JSON.stringify(m));
-              } else {
-                const msgData = GmailClient.formatMessage(m);
-                const simplified = {
-                  id: msgData.id,
-                  threadId: msgData.threadId,
-                  subject: msgData.subject,
-                  from: msgData.from,
-                  to: msgData.to,
-                  date: msgData.date,
-                  isUnread: msgData.isUnread,
-                  labels: msgData.labels.join(','),
-                  snippet: msgData.snippet
-                };
-                console.log(JSON.stringify(simplified));
-              }
-            });
-          }
-        } else {
-          // Default: show detailed summary (either explicitly requested or default)
-          const messages = client.getMessages(result.messages.map(m => m.id), 'full');
+        const messages = client.getMessages(result.messages.map(m => m.id), 'full');
+        const formatted = messages.map(m => {
+          if (m.error) return m;
+          return GmailClient.formatMessage(m);
+        });
+        
+        if (parsed.options.summary) {
           printMessagesSummary(messages);
+        } else {
+          console.log(JSON.stringify(formatted));
         }
         break;
       }
@@ -833,51 +971,22 @@ function main() {
         if (!result.messages || result.messages.length === 0) {
           if (parsed.options.summary) {
             console.log('No unread messages - inbox is clear!');
-          } else if (parsed.options.json) {
-            console.log(JSON.stringify({ messages: [], resultSizeEstimate: 0 }, null, 2));
           } else {
-            console.log('No unread messages - inbox is clear!');
+            console.log(JSON.stringify({ messages: [], resultSizeEstimate: 0 }));
           }
           break;
         }
         
         const messages = client.getMessages(result.messages.map(m => m.id), 'full');
+        const formatted = messages.map(m => {
+          if (m.error) return m;
+          return GmailClient.formatMessage(m);
+        });
         
-        if (parsed.options.json) {
-          const sandboxFixed = process.env.PAVE_SANDBOX_FIXED === 'true';
-          
-          if (sandboxFixed) {
-            // Future: When sandbox issue is fixed, output proper JSON array
-            const formatted = messages.map(m => {
-              if (m.error) return m;
-              return GmailClient.formatMessage(m);
-            });
-            console.log(JSON.stringify(formatted, null, 2));
-          } else {
-            // Current: Output each message as separate JSON line
-            messages.forEach(m => {
-              if (m.error) {
-                console.log(JSON.stringify(m));
-              } else {
-                const msgData = GmailClient.formatMessage(m);
-                const simplified = {
-                  id: msgData.id,
-                  threadId: msgData.threadId,
-                  subject: msgData.subject,
-                  from: msgData.from,
-                  to: msgData.to,
-                  date: msgData.date,
-                  isUnread: msgData.isUnread,
-                  labels: msgData.labels.join(','),
-                  snippet: msgData.snippet
-                };
-                console.log(JSON.stringify(simplified));
-              }
-            });
-          }
-        } else {
-          // Default: summary format (covers --summary flag and no flags)
+        if (parsed.options.summary) {
           printMessagesSummary(messages);
+        } else {
+          console.log(JSON.stringify(formatted));
         }
         break;
       }
@@ -906,24 +1015,57 @@ function main() {
         const bodyText = GmailClient.extractBody(message.payload);
         const attachments = GmailClient.extractAttachments(message.payload?.parts);
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify(message, null, 2));
-        } else {
+        // Write full content to file to avoid context explosion
+        // LLM can use the read tool with offset/limit (40 lines/page) to paginate
+        var fs_read = require('fs');
+        var filePath = '/tmp/gmail_msg_' + messageId + '.md';
+        var fullContent = '';
+        fullContent += 'Subject: ' + formatted.subject + '\n';
+        fullContent += 'From: ' + formatted.from + '\n';
+        fullContent += 'To: ' + formatted.to + '\n';
+        fullContent += 'Date: ' + formatted.date + '\n';
+        fullContent += 'Labels: ' + formatted.labels.join(', ') + '\n';
+        if (attachments.length > 0) {
+          fullContent += '\nAttachments (' + attachments.length + '):\n';
+          attachments.forEach(function(att, idx) {
+            var sizeStr = att.size > 1024 ? Math.round(att.size / 1024) + 'KB' : att.size + 'B';
+            fullContent += (idx + 1) + '. ' + att.filename + ' (' + att.mimeType + ', ' + sizeStr + ')\n';
+          });
+        }
+        fullContent += '\n---\n\n' + (bodyText || message.snippet || '');
+        fs_read.writeFileSync(filePath, fullContent, 'utf8');
+        var lineCount = fullContent.split('\n').length;
+        
+        if (parsed.options.summary) {
           console.log('Subject: ' + formatted.subject);
           console.log('From: ' + formatted.from);
-          console.log('To: ' + formatted.to);
           console.log('Date: ' + formatted.date);
-          console.log('Labels: ' + formatted.labels.join(', '));
-          
           if (attachments.length > 0) {
-            console.log('\nAttachments (' + attachments.length + '):');
+            console.log('Attachments (' + attachments.length + '):');
             attachments.forEach(function(att, idx) {
-              var sizeStr = att.size > 1024 ? Math.round(att.size / 1024) + 'KB' : att.size + 'B';
-              console.log('  ' + (idx + 1) + '. ' + att.filename + ' (' + att.mimeType + ', ' + sizeStr + ')');
+              console.log('  ' + (idx + 1) + '. ' + att.filename);
             });
           }
-          
-          console.log('\nContent:\n' + (bodyText || message.snippet));
+          console.log('');
+          console.log('Full content (' + lineCount + ' lines) written to: ' + filePath);
+        } else {
+          // JSON mode (default) - compact reference with file path
+          console.log(JSON.stringify({
+            messageId: messageId,
+            threadId: formatted.threadId,
+            subject: formatted.subject,
+            from: formatted.from,
+            to: formatted.to,
+            date: formatted.date,
+            labels: formatted.labels,
+            snippet: formatted.snippet,
+            isUnread: formatted.isUnread,
+            attachments: attachments.map(function(a) {
+              return { filename: a.filename, mimeType: a.mimeType, size: a.size, attachmentId: a.attachmentId };
+            }),
+            contentFile: filePath,
+            contentLines: lineCount
+          }));
         }
         break;
       }
@@ -940,9 +1082,7 @@ function main() {
         const formatted = GmailClient.formatMessage(message);
         const attachments = GmailClient.extractAttachments(message.payload?.parts);
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify({ messageId: messageId, subject: formatted.subject, attachments: attachments }, null, 2));
-        } else {
+        if (parsed.options.summary) {
           console.log('Message: ' + formatted.subject);
           console.log('From: ' + formatted.from);
           console.log('');
@@ -960,6 +1100,8 @@ function main() {
               console.log('');
             });
           }
+        } else {
+          console.log(JSON.stringify({ messageId: messageId, subject: formatted.subject, attachments: attachments }));
         }
         break;
       }
@@ -1005,10 +1147,10 @@ function main() {
         var fs = require('fs');
         fs.writeFileSync(outputPath, binary, 'binary');
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify({ success: true, path: outputPath, size: binary.length }));
-        } else {
+        if (parsed.options.summary) {
           console.log('Downloaded: ' + outputPath + ' (' + binary.length + ' bytes)');
+        } else {
+          console.log(JSON.stringify({ success: true, path: outputPath, size: binary.length }));
         }
         break;
       }
@@ -1104,14 +1246,14 @@ function main() {
         
         var draft = client.createDraft(draftOpts);
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify(draft, null, 2));
-        } else {
+        if (parsed.options.summary) {
           console.log('Draft created successfully');
           console.log('  Draft ID: ' + draft.id);
           console.log('  Message ID: ' + (draft.message?.id || 'N/A'));
           console.log('  To: ' + to);
           console.log('  Subject: ' + (draftOpts.subject || '(no subject)'));
+        } else {
+          console.log(JSON.stringify(draft));
         }
         break;
       }
@@ -1123,23 +1265,15 @@ function main() {
         });
         
         if (!draftsList.drafts || draftsList.drafts.length === 0) {
-          console.log('No drafts found.');
+          if (parsed.options.summary) {
+            console.log('No drafts found.');
+          } else {
+            console.log(JSON.stringify({ drafts: [] }));
+          }
           break;
         }
         
-        if (parsed.options.json) {
-          // Get full details for each draft
-          var fullDrafts = [];
-          for (var di = 0; di < draftsList.drafts.length; di++) {
-            try {
-              var d = client.getDraft(draftsList.drafts[di].id);
-              fullDrafts.push(d);
-            } catch (e) {
-              fullDrafts.push({ id: draftsList.drafts[di].id, error: e.message });
-            }
-          }
-          console.log(JSON.stringify(fullDrafts, null, 2));
-        } else {
+        if (parsed.options.summary) {
           console.log('Found ' + draftsList.drafts.length + ' draft(s):\n');
           for (var dj = 0; dj < draftsList.drafts.length; dj++) {
             try {
@@ -1154,6 +1288,18 @@ function main() {
               console.log('');
             }
           }
+        } else {
+          // Get full details for each draft
+          var fullDrafts = [];
+          for (var di = 0; di < draftsList.drafts.length; di++) {
+            try {
+              var d = client.getDraft(draftsList.drafts[di].id);
+              fullDrafts.push(d);
+            } catch (e) {
+              fullDrafts.push({ id: draftsList.drafts[di].id, error: e.message });
+            }
+          }
+          console.log(JSON.stringify(fullDrafts));
         }
         break;
       }
@@ -1168,12 +1314,12 @@ function main() {
         
         var sentResult = client.sendDraft(draftId);
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify(sentResult, null, 2));
-        } else {
+        if (parsed.options.summary) {
           console.log('Draft sent successfully!');
           console.log('  Message ID: ' + (sentResult.id || 'N/A'));
           console.log('  Thread ID: ' + (sentResult.threadId || 'N/A'));
+        } else {
+          console.log(JSON.stringify(sentResult));
         }
         break;
       }
@@ -1188,10 +1334,10 @@ function main() {
         
         client.deleteDraft(delDraftId);
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify({ success: true, draftId: delDraftId }));
-        } else {
+        if (parsed.options.summary) {
           console.log('Draft deleted: ' + delDraftId);
+        } else {
+          console.log(JSON.stringify({ success: true, draftId: delDraftId }));
         }
         break;
       }
@@ -1230,14 +1376,14 @@ function main() {
         
         var sent = client.sendMessage(sendOpts);
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify(sent, null, 2));
-        } else {
+        if (parsed.options.summary) {
           console.log('Email sent successfully!');
           console.log('  Message ID: ' + (sent.id || 'N/A'));
           console.log('  Thread ID: ' + (sent.threadId || 'N/A'));
           console.log('  To: ' + sendTo);
           console.log('  Subject: ' + (sendOpts.subject || '(no subject)'));
+        } else {
+          console.log(JSON.stringify(sent));
         }
         break;
       }
@@ -1390,25 +1536,25 @@ function main() {
         var replyResult;
         if (parsed.options.draft) {
           replyResult = client.createDraft(replyOpts);
-          if (parsed.options.json) {
-            console.log(JSON.stringify(replyResult, null, 2));
-          } else {
+          if (parsed.options.summary) {
             console.log('Reply draft created');
             console.log('  Draft ID: ' + replyResult.id);
             console.log('  To: ' + replyTo);
             if (replyCc) console.log('  Cc: ' + replyCc);
             console.log('  Subject: ' + replySubject);
             console.log('  Quoted thread: ' + (quotedHtml ? 'yes' : 'no'));
+          } else {
+            console.log(JSON.stringify(replyResult));
           }
         } else {
           replyResult = client.sendMessage(replyOpts);
-          if (parsed.options.json) {
-            console.log(JSON.stringify(replyResult, null, 2));
-          } else {
+          if (parsed.options.summary) {
             console.log('Reply sent!');
             console.log('  Message ID: ' + (replyResult.id || 'N/A'));
             console.log('  To: ' + replyTo);
             console.log('  Subject: ' + replySubject);
+          } else {
+            console.log(JSON.stringify(replyResult));
           }
         }
         break;
@@ -1427,19 +1573,19 @@ function main() {
           try {
             client.markAsRead(markReadIds[mri]);
             markReadResults.push({ id: markReadIds[mri], success: true });
-            if (!parsed.options.json) {
+            if (parsed.options.summary) {
               console.log('Marked as read: ' + markReadIds[mri]);
             }
           } catch (error) {
             markReadResults.push({ id: markReadIds[mri], success: false, error: error.message });
-            if (!parsed.options.json) {
+            if (parsed.options.summary) {
               console.log('Failed to mark as read: ' + markReadIds[mri] + ' - ' + error.message);
             }
           }
         }
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify(markReadResults, null, 2));
+        if (!parsed.options.summary) {
+          console.log(JSON.stringify(markReadResults));
         }
         break;
       }
@@ -1454,16 +1600,16 @@ function main() {
         
         try {
           client.markAsUnread(markUnreadId);
-          if (parsed.options.json) {
-            console.log(JSON.stringify({ success: true, messageId: markUnreadId }, null, 2));
-          } else {
+          if (parsed.options.summary) {
             console.log('Marked as unread: ' + markUnreadId);
+          } else {
+            console.log(JSON.stringify({ success: true, messageId: markUnreadId }));
           }
         } catch (error) {
-          if (parsed.options.json) {
-            console.log(JSON.stringify({ success: false, error: error.message }, null, 2));
-          } else {
+          if (parsed.options.summary) {
             console.log('Failed to mark as unread: ' + error.message);
+          } else {
+            console.log(JSON.stringify({ success: false, error: error.message }));
           }
           process.exit(1);
         }
@@ -1483,19 +1629,19 @@ function main() {
           try {
             client.trashMessage(trashIds[tri]);
             trashResults.push({ id: trashIds[tri], success: true });
-            if (!parsed.options.json) {
+            if (parsed.options.summary) {
               console.log('Moved to trash: ' + trashIds[tri]);
             }
           } catch (error) {
             trashResults.push({ id: trashIds[tri], success: false, error: error.message });
-            if (!parsed.options.json) {
+            if (parsed.options.summary) {
               console.log('Failed to trash: ' + trashIds[tri] + ' - ' + error.message);
             }
           }
         }
         
-        if (parsed.options.json) {
-          console.log(JSON.stringify(trashResults, null, 2));
+        if (!parsed.options.summary) {
+          console.log(JSON.stringify(trashResults));
         }
         break;
       }
@@ -1512,17 +1658,12 @@ function main() {
       if (process.env.DEBUG) {
         console.error('Stack trace:', error.stack);
       }
-    } else if (parsed.options.json) {
+    } else {
       console.error(JSON.stringify({
         error: error.message,
         status: error.status,
         data: error.data
-      }, null, 2));
-    } else {
-      console.error(`Gmail Error: ${error.message}`);
-      if (process.env.DEBUG) {
-        console.error('Stack trace:', error.stack);
-      }
+      }));
     }
     process.exit(1);
   }
