@@ -2,6 +2,22 @@
 
 📧 Gmail skill for OpenPAVE - Read and manage Gmail messages securely using OAuth.
 
+## ⚠️ **CRITICAL USAGE NOTE FOR AI AGENTS**
+
+### Never send mail without explicit human approval
+
+Sending email is **destructive and irreversible**. These rules apply to every Gmail interaction:
+
+**1. Always draft first, never auto-send.** When the user asks you to "reply to X", "email Y", or "send Z", that is a request to **prepare a draft** for review. Use `gmail_draft` (new mail) or `gmail_reply --draft` (replies). Never call `gmail_send` or `gmail_send_draft` until the user has read the content and explicitly approved.
+
+**2. Show the draft, then wait.** After drafting, surface the full draft body (subject, recipients, content) and wait for an explicit confirmation like "send it", "approved", or "yes send". Ambiguous responses are not approval.
+
+**3. Reply ≠ send.** The phrasing "reply to this email" is a drafting instruction, not an autonomy grant. Default behaviour is always to draft.
+
+**4. Check threading and quoting before replying.** Before calling `gmail_reply`, re-read this README and confirm the `--draft` flag, reply-all behaviour, and quoting are correct for the situation.
+
+**5. The only exceptions** are when the user has, in the same session, given an explicit standing instruction like "send all follow-ups automatically for this thread" — and even then, confirm scope.
+
 ## Installation
 
 ```bash
