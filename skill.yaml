@@ -2,7 +2,7 @@
 # Read and manage Gmail messages securely using OAuth
 
 name: gmail
-version: 2.2.0
+version: 2.3.0
 description: Read, send, and manage Gmail messages securely using OAuth
 
 author:
@@ -16,6 +16,31 @@ repository: cnrai/openpave-gmail
 # Execution pattern
 pattern: sandbox
 entrypoint: index.js
+
+# LLM Usage Instructions
+usage_notes: |
+  IMPORTANT FOR AI AGENTS:
+  
+  ## Email Reply Rules (CRITICAL)
+  When drafting email replies, ALWAYS:
+  1. Reply to the LAST email in the thread — use --reply-to <messageId> with the most recent message ID
+  2. Reply All — Include all CC recipients from the original email
+  3. Include full thread — The --reply-to flag automatically includes the email history
+  4. NEVER create a new email thread when replying — always use --reply-to to maintain conversation context
+  
+  Gmail draft command for replies:
+  ```
+  gmail draft --to "recipient@example.com" --cc "cc1@example.com,cc2@example.com" --subject "Re: Original Subject" --body "Your reply body here" --reply-to <originalMessageId>
+  ```
+  
+  ## Multi-line Email Body
+  - For simple single-line body: Use --body parameter
+  - For multi-line or HTML body: Use --input with a file
+  - Write content to /tmp/draft-body.html, then use --input /tmp/draft-body.html
+  
+  ## Draft Before Sending
+  - ALWAYS create a draft first (draft command) and wait for user approval before sending
+  - Never send directly without user confirmation
 
 # Available commands
 commands:
